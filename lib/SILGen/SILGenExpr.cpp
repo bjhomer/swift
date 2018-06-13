@@ -1327,6 +1327,9 @@ RValue RValueEmitter::visitForceTryExpr(ForceTryExpr *E, SGFContext C) {
 RValue RValueEmitter::visitOptionalTryExpr(OptionalTryExpr *E, SGFContext C) {
   // FIXME: Much of this was copied from visitOptionalEvaluationExpr.
 
+  // Prior to Swift 5, an optional try's subexpression is always wrapped in an additional optional
+  bool shouldWrapInOptional = !(SGF.getASTContext().LangOpts.isSwiftVersionAtLeast(5));
+  
   auto &optTL = SGF.getTypeLowering(E->getType());
 
   Initialization *optInit = C.getEmitInto();
@@ -1357,14 +1360,27 @@ RValue RValueEmitter::visitOptionalTryExpr(OptionalTryExpr *E, SGFContext C) {
     JumpDest(catchBB, SGF.Cleanups.getCleanupsDepth(), E)};
 
   SILValue branchArg;
-  if (isByAddress) {
-    assert(optInit);
-    SGF.emitExprInto(E->getSubExpr(), optInit);
-  } else {
-    ManagedValue subExprValue = SGF.emitRValueAsSingleValue(E->getSubExpr());
-    branchArg = subExprValue.forward(SGF);
+  if (shouldWrapInOptional) {
+    if (isByAddress) {
+      assert(optInit);
+      SILValue optAddr = optInit->getAddressForInPlaceInitialization(SGF, E);
+      SGF.emitInjectOptionalValueInto(E, E->getSubExpr(), optAddr, optTL);
+    } else {
+      ManagedValue subExprValue = SGF.emitRValueAsSingleValue(E->getSubExpr());
+      ManagedValue wrapped = SGF.getOptionalSomeValue(E, subExprValue, optTL);
+      branchArg = wrapped.forward(SGF);
+    }
   }
-
+  else {
+    if (isByAddress) {
+      assert(optInit);
+      SGF.emitExprInto(E->getSubExpr(), optInit);
+    } else {
+      ManagedValue subExprValue = SGF.emitRValueAsSingleValue(E->getSubExpr());
+      branchArg = subExprValue.forward(SGF);
+    }
+  }
+  
   localCleanups.pop();
 
   // If it turns out there are no uses of the catch block, just drop it.
@@ -1376,6 +1392,10 @@ RValue RValueEmitter::visitOptionalTryExpr(OptionalTryExpr *E, SGFContext C) {
     if (!isByAddress)
       return RValue(SGF, E,
                     SGF.emitManagedRValueWithCleanup(branchArg, optTL));
+    
+    if (shouldWrapInOptional) {
+      optInit->finishInitialization(SGF);
+    }
 
     // If we emitted into the provided context, we're done.
     if (usingProvidedContext)
@@ -1422,6 +1442,10 @@ RValue RValueEmitter::visitOptionalTryExpr(OptionalTryExpr *E, SGFContext C) {
     return RValue(SGF, E, SGF.emitManagedRValueWithCleanup(arg, optTL));
   }
 
+  if (shouldWrapInOptional) {
+    optInit->finishInitialization(SGF);
+  }
+  
   // If we emitted into the provided context, we're done.
   if (usingProvidedContext)
     return RValue::forInContext();
